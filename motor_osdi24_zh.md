@@ -116,7 +116,13 @@ Motor 将 CVT 与数据值在内存池中分开存储：协调者先读取 CVT �
 
 **属性条带（Attribute Bar）。** 在 delta 区中，Motor 利用**属性条带**结构连续紧凑地存储某条记录跨事务的被修改属性。CVT 头部的 AttrBarPtr 指向该属性条带；Vcell 中的 Bitmap 记录当前版本修改了哪些属性；StartOffset 记录当前版本的属性在属性条带中的偏移量。
 
-**属性条带大小。** Motor 通过采样事务执行来估计每条记录在一次事务中被修改属性的总大小（TotAttrSize）分布，并据此估算属性条带大小（ABS）：$\text{ABS} = \sum_{i=1}^{n} \max(VNum \times Frequency_i, 1) \times TotAttrSize_i$。
+**属性条带大小。** Motor 通过采样事务执行来估计每条记录在一次事务中被修改属性的总大小（TotAttrSize）分布，并据此估算属性条带大小（ABS）：
+
+$$\text{ABS} = \sum_{i=1}^{n} \max\!\left(VNum \times Frequency_i,\ 1\right) \times TotAttrSize_i$$
+
+其中 $n$ 为不同 TotAttrSize 取值的个数，$Frequency_i$ 为第 $i$ 种修改大小在事务中出现的频率。原文公式截图如下：
+
+![ABS公式](figures/formula_abs.png)
 
 **缓解属性条带分配争用。** Motor 预先为每个协调者分配专属的小块 delta 空间，协调者在自己的 delta 空间中分配属性条带，无需与其他协调者竞争。
 
@@ -296,15 +302,35 @@ FORD 仅存储一个版本，内存开销最低。Motor 和 FaRMv2-DM 因支持�
 
 当减少 VNum 时，Motor 的内存占用最多降低 22.8%，接近 FORD，但吞吐量仍高于 FORD 和 FaRMv2-DM。当 VNum 从 2 增加到 8（增加 4 倍）时，Motor 内存占用仅增加约 1.4–2.1 倍，远低于线性增长，体现了属性存储的高效性。当 ABS 增大时吞吐量基本不变，证明了 Motor 估算 ABS 的高效性——所估算的大小恰好足够，无需浪费空间。
 
+![图15](figures/fig15.png)
+
+**图15：** 调整 VNum 改变内存占用时，第50百分位延迟的对比。术语说明：50th percentile latency（第50百分位延迟）、Total memory used（总内存占用）
+
+![图16](figures/fig16.png)
+
+**图16：** 调整 VNum 改变内存占用时，第99百分位延迟的对比。术语说明：99th percentile latency（第99百分位延迟）、Total memory used（总内存占用）
+
 ### 7.7 不同隔离级别的性能
+
+![图17](figures/fig17.png)
+
+**图17：** Motor-SR（可串行化）与 Motor-SI（快照隔离）在 TATP 和 TPCC 基准上的事务吞吐量与延迟对比。术语说明：Motor-SR（Serializability，可串行化隔离级别）、Motor-SI（Snapshot Isolation，快照隔离级别）、Transaction throughput（事务吞吐量）、50th/99th percentile latency（第50/99百分位延迟）
 
 Motor-SI（快照隔离）通过消除读写事务的验证阶段，在读密集型（TATP）和写密集型（TPCC）工作负载上均实现了比 Motor-SR（可串行化）更低的延迟和更高的吞吐量。在 TPCC 上，Motor-SI 的改善幅度高于 TATP，因为 TPCC 每个事务访问更多只读数据，且读写争用更高，放宽隔离要求带来了更大的性能提升。
 
 ### 7.8 内存池使用持久内存（PM）
 
+![图18](figures/fig18.png)
+
+**图18：** 内存池使用 DRAM 和 PM（持久内存）时，Motor 在 TPCC 基准上的事务吞吐量与延迟对比。术语说明：Motor-DRAM（使用动态随机存取存储器）、Motor-PM（使用 Intel Optane 持久内存）、Transaction throughput（事务吞吐量）、50th/99th percentile latency（第50/99百分位延迟）
+
 Motor 使用 6 块 128GB Intel Optane PM 模块评估 TPCC 性能（采用 RDMA READ-after-WRITE 确保远程数据持久化）。使用 PM 时，吞吐量仅降低 13.1%，证明 Motor 在 DRAM 和 PM 上均能高效工作，为不同类型内存设备上的应用提供了良好的可移植性。
 
 ### 7.9 容错性
+
+![图19](figures/fig19.png)
+
+**图19：** TPCC 基准上 Motor 在协调者故障（a）和副本故障（b）下的事务吞吐量时间线。术语说明：(a) Tolerating coordinator failures（容忍协调者故障）、(b) Tolerating replica failures（容忍副本故障）、Throughput（吞吐量）、failure occurs（故障发生时刻）、recovery finishes（恢复完成时刻）、Primary failure（主副本故障）、Backup failure（备副本故障）
 
 在 TPCC 基准上测试 Motor 在协调者故障和副本故障下的恢复能力（以 1ms 为间隔报告瞬时吞吐量）：
 
