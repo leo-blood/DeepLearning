@@ -1,0 +1,887 @@
+# DPO 课件公式详解
+
+源文件：`论文/DPO/课件.md`
+
+本文把课件中的核心公式按“**符号含义 → 数学推导 → 直观理解 → 训练意义**”的顺序详细解释一遍，适合做课件讲稿、复习笔记或答辩材料。
+
+---
+
+## 0. 先统一记号
+
+在 DPO（Direct Preference Optimization）里，常见符号含义如下：
+
+- `x`：prompt / 输入问题
+- `y`：模型生成的完整回答序列
+- `y_w`：winning answer，被偏好的人类“更喜欢”的回答
+- `y_l`：losing answer，被偏好的人类“没那么喜欢”的回答
+- `π(y|x)`：策略模型对回答 `y` 的条件概率
+- `π_θ(y|x)`：当前正在训练的模型（参数为 `θ`）
+- `π_ref(y|x)`：参考模型，通常是 SFT 模型，训练时冻结
+- `r(x,y)`：奖励函数，表示回答 `y` 在输入 `x` 下有多“好”
+- `β`：温度 / 正则强度参数，用来控制模型偏离参考模型的程度
+- `σ(z)`：sigmoid 函数，定义为
+
+```tex
+\sigma(z)=\frac{1}{1+e^{-z}}
+```
+
+注意：
+
+1. 这里的 `π(y|x)` 是**整个回答序列**的概率，不是单个 token 的概率。  
+2. 实际实现时通常使用**对数概率**：
+
+```tex
+\log \pi(y|x)=\sum_{t=1}^{T}\log \pi(y_t|x,y_{<t})
+```
+
+也就是说，一个回答序列的 log probability，是每个 token 的 log probability 之和。
+
+---
+
+## 1. RLHF 的优化目标
+
+课件中的第一个核心公式是：
+
+```tex
+\max_{\pi} \; \mathbb{E}_{x \sim D, y \sim \pi}[r(x,y)] - \beta \cdot KL[\pi(y|x) \| \pi_{ref}(y|x)]
+```
+
+这是一个典型的 **RLHF with KL regularization** 目标。
+
+### 1.1 每一项是什么意思？
+
+这个目标由两部分组成：
+
+#### 第一项：奖励最大化
+
+```tex
+\mathbb{E}_{x \sim D, y \sim \pi}[r(x,y)]
+```
+
+意思是：
+
+- 从数据分布 `D` 里采样 prompt `x`
+- 用当前策略 `π` 生成回答 `y`
+- 用奖励函数 `r(x,y)` 给这个回答打分
+- 希望平均奖励越高越好
+
+直观上，这一项在说：
+
+> “让模型生成更符合人类偏好的回答。”
+
+#### 第二项：不要偏离参考模型太远
+
+```tex
+\beta \cdot KL[\pi(y|x) \| \pi_{ref}(y|x)]
+```
+
+KL 散度衡量的是：**当前模型 `π` 和参考模型 `π_ref` 有多不一样**。
+
+因为这一项前面是减号，所以优化时会倾向于：
+
+- 奖励高
+- 但又不能为了追求奖励而离参考模型太远
+
+直观上，它在防止模型：
+
+- 语言风格崩坏
+- 输出分布过度偏移
+- 为了拿高奖励学出奇怪回答
+
+### 1.2 `β` 的作用
+
+由于目标是：
+
+```tex
+\text{奖励} - \beta \cdot \text{KL}
+```
+
+所以：
+
+- `β` 大：KL 惩罚更强，模型更保守，更接近 `π_ref`
+- `β` 小：KL 惩罚更弱，模型更容易为了奖励而偏离参考模型
+
+这和 DPO 里的经验结论一致：
+
+- 小 `β`：学偏好更激进
+- 大 `β`：更稳、更保守
+
+---
+
+## 2. RLHF 目标为什么有解析最优解？
+
+课件给出的最优解是：
+
+```tex
+\pi^*(y|x) = \frac{1}{Z(x)} \pi_{ref}(y|x) \exp\left(\frac{1}{\beta} r(x,y)\right)
+```
+
+这个公式非常重要，它说明：
+
+> **最优策略 = 参考策略 × 奖励的指数加权，再做归一化。**
+
+### 2.1 先固定一个 prompt `x`
+
+对每个固定的 `x`，优化目标可以写成：
+
+```tex
+J_x(\pi)=\sum_y \pi(y|x)r(x,y)-\beta \sum_y \pi(y|x)\log\frac{\pi(y|x)}{\pi_{ref}(y|x)}
+```
+
+并满足概率分布约束：
+
+```tex
+\sum_y \pi(y|x)=1
+```
+
+### 2.2 用拉格朗日乘子法
+
+构造拉格朗日函数：
+
+```tex
+\mathcal{J}=\sum_y \pi(y|x)r(x,y)-\beta \sum_y \pi(y|x)\log\frac{\pi(y|x)}{\pi_{ref}(y|x)}+\lambda\left(\sum_y \pi(y|x)-1\right)
+```
+
+对 `π(y|x)` 求偏导并令其为 0：
+
+```tex
+\frac{\partial \mathcal{J}}{\partial \pi(y|x)} = r(x,y)-\beta\left(\log\frac{\pi(y|x)}{\pi_{ref}(y|x)}+1\right)+\lambda = 0
+```
+
+移项可得：
+
+```tex
+\log\frac{\pi(y|x)}{\pi_{ref}(y|x)} = \frac{1}{\beta}r(x,y) + \frac{\lambda}{\beta} - 1
+```
+
+再指数化：
+
+```tex
+\pi(y|x)=\pi_{ref}(y|x)\exp\left(\frac{1}{\beta}r(x,y) + \frac{\lambda}{\beta} - 1\right)
+```
+
+把与 `y` 无关的常数统一记成归一化因子，就得到：
+
+```tex
+\pi^*(y|x) = \frac{1}{Z(x)} \pi_{ref}(y|x)\exp\left(\frac{1}{\beta}r(x,y)\right)
+```
+
+其中
+
+```tex
+Z(x)=\sum_y \pi_{ref}(y|x)\exp\left(\frac{1}{\beta}r(x,y)\right)
+```
+
+### 2.3 这个解怎么理解？
+
+这个式子可以拆成三部分：
+
+#### (1) `π_ref(y|x)`
+
+表示：
+
+> 参考模型原来就喜欢的回答，天然有更大的基础概率。
+
+#### (2) `exp(r/β)`
+
+表示：
+
+> 奖励越高，回答的概率会被指数级放大。
+
+如果某个回答奖励更高，它相对于其他回答的权重会迅速增大。
+
+#### (3) `1/Z(x)`
+
+表示：
+
+> 把所有回答重新归一化，确保总概率和为 1。
+
+所以整个公式的直观含义是：
+
+> “从参考模型的分布出发，把高奖励回答抬高、低奖励回答压低，然后重新归一化。”
+
+这其实就是一种 **Boltzmann / Gibbs 分布** 的形式。
+
+---
+
+## 3. 奖励函数可以反过来由策略表示
+
+课件下一步写到：
+
+```tex
+r(x,y) = \beta \log \frac{\pi^*(y|x)}{\pi_{ref}(y|x)} + \beta \log Z(x)
+```
+
+### 3.1 这是怎么来的？
+
+从刚才的最优策略公式出发：
+
+```tex
+\pi^*(y|x) = \frac{1}{Z(x)} \pi_{ref}(y|x) \exp\left(\frac{1}{\beta}r(x,y)\right)
+```
+
+两边先除以 `π_ref(y|x)`：
+
+```tex
+\frac{\pi^*(y|x)}{\pi_{ref}(y|x)} = \frac{1}{Z(x)}\exp\left(\frac{1}{\beta}r(x,y)\right)
+```
+
+再取对数：
+
+```tex
+\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)} = -\log Z(x)+\frac{1}{\beta}r(x,y)
+```
+
+乘回 `β`：
+
+```tex
+\beta\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)} = -\beta\log Z(x)+r(x,y)
+```
+
+于是得到：
+
+```tex
+r(x,y)=\beta\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)}+\beta\log Z(x)
+```
+
+### 3.2 这一步为什么重要？
+
+这一步是 DPO 的理论核心，因为它说明：
+
+> **奖励函数不一定要单独训练出来。**
+
+只要知道：
+
+- 当前策略相对于参考策略提高了多少概率
+
+就能把它解释成一种“隐式奖励”。
+
+换句话说：
+
+> **语言模型本身就携带了奖励信息。**
+
+### 3.3 `β log Z(x)` 是什么？
+
+`Z(x)` 只依赖于 prompt `x`，不依赖于某个具体回答 `y`。  
+所以对于**同一个 prompt 下两个回答的比较**，这个项会被抵消掉。
+
+这正是后面 DPO 能绕过显式奖励模型的关键。
+
+---
+
+## 4. Bradley-Terry 偏好模型
+
+课件中的偏好概率公式是：
+
+```tex
+p(y_w \succ y_l | x) = \sigma\left(\beta \log \frac{\pi(y_w|x)}{\pi_{ref}(y_w|x)} - \beta \log \frac{\pi(y_l|x)}{\pi_{ref}(y_l|x)}\right)
+```
+
+这个公式来自 **Bradley-Terry 模型**。
+
+### 4.1 Bradley-Terry 模型本来的形式
+
+它假设每个候选回答都有一个“效用分数”或“奖励分数”。
+
+若两个回答分别是 `y_w` 和 `y_l`，则人类偏好 `y_w` 胜过 `y_l` 的概率为：
+
+```tex
+p(y_w \succ y_l|x)=\frac{\exp(r(x,y_w))}{\exp(r(x,y_w)) + \exp(r(x,y_l))}
+```
+
+这个式子可以化成 sigmoid 形式：
+
+```tex
+p(y_w \succ y_l|x)=\sigma(r(x,y_w)-r(x,y_l))
+```
+
+因为：
+
+```tex
+\frac{e^a}{e^a+e^b}=\frac{1}{1+e^{-(a-b)}}=\sigma(a-b)
+```
+
+### 4.2 把“奖励”替换成“策略比值”
+
+根据上一节：
+
+```tex
+r(x,y)=\beta\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)}+\beta\log Z(x)
+```
+
+代入两回答差值：
+
+```tex
+r(x,y_w)-r(x,y_l)
+```
+
+得到：
+
+```tex
+\beta\log\frac{\pi^*(y_w|x)}{\pi_{ref}(y_w|x)}+\beta\log Z(x)
+-\left(\beta\log\frac{\pi^*(y_l|x)}{\pi_{ref}(y_l|x)}+\beta\log Z(x)\right)
+```
+
+其中 `+β log Z(x)` 和 `-β log Z(x)` 正好抵消，剩下：
+
+```tex
+r(x,y_w)-r(x,y_l)=
+\beta\log\frac{\pi^*(y_w|x)}{\pi_{ref}(y_w|x)}
+-\beta\log\frac{\pi^*(y_l|x)}{\pi_{ref}(y_l|x)}
+```
+
+于是：
+
+```tex
+p(y_w \succ y_l|x)=
+\sigma\left(
+\beta\log\frac{\pi^*(y_w|x)}{\pi_{ref}(y_w|x)}
+-\beta\log\frac{\pi^*(y_l|x)}{\pi_{ref}(y_l|x)}
+\right)
+```
+
+在训练时把 `π*` 用参数化模型 `π_θ` 去近似，就得到 DPO 训练公式。
+
+### 4.3 这个公式的直观意义
+
+关注里面的差值：
+
+```tex
+\beta\log\frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)}
+-
+\beta\log\frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}
+```
+
+含义是：
+
+- 如果当前模型相对参考模型，**更大幅度地抬高了好回答的概率**
+- 同时 **没有抬高或甚至压低差回答的概率**
+
+那么人类偏好好回答的概率就会更高。
+
+所以 DPO 并不是单纯让 `π_θ(y_w|x)` 大、`π_θ(y_l|x)` 小，
+而是让它们相对于 `π_ref` 的变化方向，符合偏好数据。
+
+---
+
+## 5. DPO 损失函数
+
+课件中的 DPO 损失是：
+
+```tex
+\mathcal{L}_{DPO}(\pi_\theta) = -\mathbb{E}_{(x, y_w, y_l)} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)} \right) \right]
+```
+
+这就是 DPO 的核心训练目标。
+
+### 5.1 它本质上是在做什么？
+
+因为 Bradley-Terry 给出了：
+
+```tex
+p_\theta(y_w \succ y_l|x)=\sigma(\text{某个分数差})
+```
+
+所以最自然的训练方式就是对人类偏好数据做**最大似然估计**。  
+也就是：
+
+- 人类说 `y_w` 胜过 `y_l`
+- 我们就让模型给这件事更大的概率
+
+于是负对数似然损失就是：
+
+```tex
+-\log p_\theta(y_w \succ y_l|x)
+```
+
+把 `p_θ` 展开，就得到 DPO loss。
+
+### 5.2 定义一个更直观的量：`Δ`
+
+课件里定义了：
+
+```tex
+\Delta = \underbrace{\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)}}_{\text{好回答的相对得分}} - \underbrace{\beta \log \frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}}_{\text{差回答的相对得分}}
+```
+
+那么损失就简化成：
+
+```tex
+\mathcal{L}_{DPO} = -\log \sigma(\Delta)
+```
+
+### 5.3 `Δ` 为什么叫“隐式奖励差”？
+
+因为前面已经证明：
+
+```tex
+r(x,y) \approx \beta \log\frac{\pi_\theta(y|x)}{\pi_{ref}(y|x)} + \text{与 } y \text{ 无关的常数}
+```
+
+所以两者相减时，与 `y` 无关的常数消掉，剩下的就是：
+
+> “当前模型认为好回答比差回答好多少”
+
+这就是一个**隐式的奖励差**。
+
+---
+
+## 6. 为什么 `-log σ(Δ)` 能推动模型学偏好？
+
+### 6.1 当 `Δ` 很大时
+
+若 `Δ \gg 0`，则
+
+```tex
+\sigma(\Delta) \approx 1
+```
+
+于是
+
+```tex
+-\log\sigma(\Delta) \approx 0
+```
+
+说明：
+
+> 模型已经非常确信“好回答优于差回答”，损失就很小。
+
+### 6.2 当 `Δ = 0` 时
+
+此时
+
+```tex
+\sigma(0)=0.5
+```
+
+所以：
+
+```tex
+-\log 0.5 \approx 0.693
+```
+
+说明：
+
+> 模型分不清好坏回答，损失中等。
+
+### 6.3 当 `Δ < 0` 时
+
+这意味着模型反而在某种意义上更偏向差回答，
+于是：
+
+```tex
+\sigma(\Delta) < 0.5
+```
+
+损失会变大。
+
+### 6.4 从梯度角度看
+
+对
+
+```tex
+L(\Delta)=-\log\sigma(\Delta)
+```
+
+求导：
+
+```tex
+\frac{dL}{d\Delta}=\sigma(\Delta)-1 = -\sigma(-\Delta)
+```
+
+这个导数通常是负的（除非 `Δ` 已经非常大），意味着优化会推动 `Δ` 继续增大。
+
+而增大 `Δ` 的方式包括：
+
+- 提高 `\log \pi_\theta(y_w|x)`：让好回答概率更大
+- 降低 `\log \pi_\theta(y_l|x)`：让差回答概率更小
+
+这就对应了课件里的直观解释。
+
+---
+
+## 7. 从“对数比值”理解 DPO 最重要
+
+把 `Δ` 重新整理一下：
+
+```tex
+\Delta = \beta\left[
+\left(\log\pi_\theta(y_w|x)-\log\pi_\theta(y_l|x)\right)
+-
+\left(\log\pi_{ref}(y_w|x)-\log\pi_{ref}(y_l|x)\right)
+\right]
+```
+
+也可以写成：
+
+```tex
+\Delta = \beta \left[
+\log\frac{\pi_\theta(y_w|x)}{\pi_\theta(y_l|x)}
+-
+\log\frac{\pi_{ref}(y_w|x)}{\pi_{ref}(y_l|x)}
+\right]
+```
+
+### 7.1 这说明什么？
+
+它说明 DPO 学的是：
+
+> **当前模型相对于参考模型，对“好回答 vs 差回答”的偏好强度提升了多少。**
+
+如果参考模型本来就稍微更喜欢好回答，那么 DPO 不是从零开始学。  
+它是在原有基础上继续把偏好拉开。
+
+### 7.2 为什么要减去参考模型项？
+
+因为只看当前模型的概率会有两个问题：
+
+1. 不同 prompt 下回答长度、语言风格、常见表达都会影响绝对概率
+2. 一些回答本来就更常见，不一定代表更符合偏好
+
+减去 `π_ref` 后，学到的是：
+
+> “相对于基础模型，这个回答被提拔了多少 / 被压低了多少。”
+
+这让学习目标更稳定，也更接近“偏好校正”而不是“无约束重写分布”。
+
+---
+
+## 8. 为什么说 DPO 不需要显式奖励模型？
+
+传统 RLHF 的流程通常是：
+
+1. 收集偏好对 `(x, y_w, y_l)`
+2. 训练奖励模型 `RM`，使得 `RM(x,y_w) > RM(x,y_l)`
+3. 用 PPO 优化策略，让模型产出高奖励回答
+
+而 DPO 直接利用下面的关系：
+
+```tex
+r(x,y) \leftrightarrow \beta\log\frac{\pi(y|x)}{\pi_{ref}(y|x)} + \text{常数}
+```
+
+于是可以直接把偏好数据转成一个监督学习式的目标：
+
+```tex
+-\log\sigma(\Delta)
+```
+
+因此：
+
+- 不用单独训练 RM
+- 不用再做 PPO 在线强化学习
+- 直接像普通微调一样做梯度下降即可
+
+这就是 DPO 最大的工程优势。
+
+---
+
+## 9. `β` 在 DPO 公式中到底起什么作用？
+
+课件给出的表达是：
+
+```tex
+\beta \log \frac{\pi_\theta(y|x)}{\pi_{ref}(y|x)}
+```
+
+### 9.1 数学上：缩放偏好差值
+
+在 DPO 里，`β` 直接乘在 log-ratio 前面，控制 `Δ` 的尺度：
+
+```tex
+\Delta = \beta \cdot (\text{对数比值差})
+```
+
+如果 `β` 改变，sigmoid 输入的大小就会改变，从而改变：
+
+- 损失曲线的形状
+- 梯度强度
+- 模型偏离参考模型的倾向
+
+### 9.2 直觉上：保守或激进
+
+结合 RLHF 原始目标理解：
+
+- `β` 小：KL 约束弱，允许策略更明显地偏离参考模型，学习更激进
+- `β` 大：KL 约束强，模型更保守，更接近参考模型
+
+### 9.3 实践中如何理解
+
+可以把 `β` 看成一个“偏好放大器 / 刹车器”：
+
+- 太小：可能学得猛，但容易过拟合偏好数据或牺牲通用能力
+- 太大：很稳，但偏好信号可能学不进去
+
+所以 `β` 通常需要在验证集上调参。
+
+---
+
+## 10. 代码中的公式对应关系
+
+课件中的代码：
+
+```python
+def dpo_loss(pi_logps_chosen, pi_logps_rejected,
+             ref_logps_chosen, ref_logps_rejected, beta=0.1):
+    pi_ratio  = pi_logps_chosen - pi_logps_rejected
+    ref_ratio = ref_logps_chosen - ref_logps_rejected
+    
+    logits = beta * (pi_ratio - ref_ratio)
+    
+    loss = -F.logsigmoid(logits).mean()
+    return loss
+```
+
+下面逐行对应数学意义。
+
+### 10.1 `pi_logps_chosen`
+
+表示：
+
+```tex
+\log\pi_\theta(y_w|x)
+```
+
+即当前训练模型对**好回答**的整句 log probability。
+
+### 10.2 `pi_logps_rejected`
+
+表示：
+
+```tex
+\log\pi_\theta(y_l|x)
+```
+
+即当前模型对**差回答**的整句 log probability。
+
+### 10.3 `ref_logps_chosen` / `ref_logps_rejected`
+
+分别表示：
+
+```tex
+\log\pi_{ref}(y_w|x), \quad \log\pi_{ref}(y_l|x)
+```
+
+### 10.4 `pi_ratio`
+
+```python
+pi_ratio = pi_logps_chosen - pi_logps_rejected
+```
+
+对应：
+
+```tex
+\log\pi_\theta(y_w|x)-\log\pi_\theta(y_l|x)
+= \log\frac{\pi_\theta(y_w|x)}{\pi_\theta(y_l|x)}
+```
+
+含义：
+
+> 当前模型对“好回答相对差回答”的偏好程度。
+
+### 10.5 `ref_ratio`
+
+```python
+ref_ratio = ref_logps_chosen - ref_logps_rejected
+```
+
+对应：
+
+```tex
+\log\frac{\pi_{ref}(y_w|x)}{\pi_{ref}(y_l|x)}
+```
+
+含义：
+
+> 参考模型原本对这两个回答的偏好程度。
+
+### 10.6 `logits`
+
+```python
+logits = beta * (pi_ratio - ref_ratio)
+```
+
+对应：
+
+```tex
+\Delta = \beta\left[
+\log\frac{\pi_\theta(y_w|x)}{\pi_\theta(y_l|x)}
+-
+\log\frac{\pi_{ref}(y_w|x)}{\pi_{ref}(y_l|x)}
+\right]
+```
+
+这就是 DPO 的核心 logit，也就是前面说的隐式奖励差。
+
+### 10.7 `-F.logsigmoid(logits)`
+
+```python
+loss = -F.logsigmoid(logits).mean()
+```
+
+因为：
+
+```tex
+\logsigmoid(z)=\log\sigma(z)
+```
+
+所以这行代码就是：
+
+```tex
+-\log\sigma(\Delta)
+```
+
+对 batch 求平均，就是整个 mini-batch 的 DPO loss。
+
+---
+
+## 11. 一个非常重要的实现细节：为什么用“序列 log 概率”
+
+很多初学者会问：
+
+> 这里为什么不是比较每个 token，而是比较整个回答 `y` 的概率？
+
+答案是因为偏好数据标注的是：
+
+- 整个回答 A 比整个回答 B 好
+
+而不是：
+
+- 第 17 个 token 比第 23 个 token 好
+
+所以 DPO 的监督信号是**序列级别**的。  
+模型会先把一个回答的 token log-prob 加总起来，得到：
+
+```tex
+\log\pi(y|x)=\sum_t \log\pi(y_t|x,y_{<t})
+```
+
+再用这个序列分数做 pairwise preference learning。
+
+这也解释了为什么 DPO 很像：
+
+- 序列级监督学习
+- 排序学习（ranking）
+- 偏好二分类
+
+三者的结合。
+
+---
+
+## 12. 用一句话概括每个关键公式
+
+### 公式 1：RLHF 目标
+
+```tex
+\max_{\pi} \mathbb{E}[r(x,y)] - \beta KL(\pi\|\pi_{ref})
+```
+
+一句话：
+
+> 在“拿高奖励”和“别偏离基础模型太远”之间做平衡。
+
+### 公式 2：最优策略
+
+```tex
+\pi^*(y|x)=\frac{1}{Z(x)}\pi_{ref}(y|x)e^{r(x,y)/\beta}
+```
+
+一句话：
+
+> 参考模型分布经过奖励加权后，就得到最优策略分布。
+
+### 公式 3：奖励反解
+
+```tex
+r(x,y)=\beta\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)}+\beta\log Z(x)
+```
+
+一句话：
+
+> 奖励可以由“当前策略相对参考策略的提升幅度”来表示。
+
+### 公式 4：偏好概率
+
+```tex
+p(y_w\succ y_l|x)=\sigma(r_w-r_l)
+```
+
+一句话：
+
+> 好回答赢过差回答的概率，取决于两者奖励差。
+
+### 公式 5：DPO 损失
+
+```tex
+\mathcal{L}_{DPO}=-\log\sigma(\Delta)
+```
+
+一句话：
+
+> 让模型越来越倾向于把好回答排在差回答前面。
+
+---
+
+## 13. 你可以怎样讲给别人听
+
+如果要把 DPO 用最容易懂的话讲出来，可以直接说：
+
+1. RLHF 本来要训练一个奖励模型，再用 PPO 优化语言模型。  
+2. DPO 发现：如果带上 KL 正则，最优策略和奖励之间有解析关系。  
+3. 因此，奖励其实可以由“当前模型相对参考模型的概率变化”隐式表示。  
+4. 再用 Bradley-Terry 把“奖励差”变成人类偏好概率。  
+5. 最后直接最小化一个二分类式的损失 `-logσ(Δ)` 就行。  
+
+所以 DPO 的本质就是：
+
+> **不用显式奖励模型，不用 PPO，直接让模型在偏好对上学会“抬高好回答、压低差回答”。**
+
+---
+
+## 14. 最后总结：DPO 公式链条
+
+把整条逻辑串起来，就是：
+
+### 第一步：从 RLHF 目标出发
+
+```tex
+\max_{\pi} \mathbb{E}[r] - \beta KL(\pi\|\pi_{ref})
+```
+
+### 第二步：得到解析最优策略
+
+```tex
+\pi^*(y|x)=\frac{1}{Z(x)}\pi_{ref}(y|x)e^{r(x,y)/\beta}
+```
+
+### 第三步：把奖励写成策略形式
+
+```tex
+r(x,y)=\beta\log\frac{\pi^*(y|x)}{\pi_{ref}(y|x)}+\beta\log Z(x)
+```
+
+### 第四步：代入 Bradley-Terry 偏好模型
+
+```tex
+p(y_w\succ y_l|x)=\sigma(r_w-r_l)
+```
+
+并利用 `Z(x)` 抵消，得到：
+
+```tex
+p(y_w\succ y_l|x)=\sigma\left(\beta\log\frac{\pi_\theta(y_w|x)}{\pi_{ref}(y_w|x)}-\beta\log\frac{\pi_\theta(y_l|x)}{\pi_{ref}(y_l|x)}\right)
+```
+
+### 第五步：对偏好数据做最大似然训练
+
+```tex
+\mathcal{L}_{DPO}=-\mathbb{E}[\log\sigma(\Delta)]
+```
+
+于是整个 DPO 成立。
+
+---
+
+## 15. 一句话总总结
+
+**DPO 的所有公式，本质都在说明一件事：在带 KL 约束的 RLHF 框架下，“奖励模型”可以被“策略相对参考模型的对数概率比”替代，因此可以直接用偏好数据对语言模型做稳定、简单的监督式优化。**
